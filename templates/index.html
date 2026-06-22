@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="DLLAJ AI — Intelligent Crosswalk Violation Detection System powered by computer vision and deep learning.">
+  <meta name="theme-color" content="#0a0a1a">
+  <title>DLLAJ AI — Crosswalk Violation Detection</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="/static/css/style.css">
+
+  <!-- Socket.IO -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <!-- ═══════════ Toast Container ═══════════ -->
+  <div id="toast-container"></div>
+
+  <!-- ═══════════ Header ═══════════ -->
+  <header>
+    <div class="logo">
+      <!-- Logo Icon -->
+      <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#logo-grad)" fill-opacity="0.15" stroke="url(#logo-grad)" stroke-width="1.5"/>
+        <path d="M10 22V14l6-4 6 4v8" stroke="url(#logo-grad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M14 22v-5h4v5" stroke="url(#logo-grad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="16" cy="12" r="1.5" fill="url(#logo-grad)"/>
+        <line x1="8" y1="25" x2="24" y2="25" stroke="url(#logo-grad)" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="2 2.5"/>
+        <defs>
+          <linearGradient id="logo-grad" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#00d4ff"/>
+            <stop offset="1" stop-color="#7c3aed"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <div class="logo-text">
+        <span class="brand">DLLAJ AI</span>
+        <span class="subtitle">Crosswalk Violation Detection</span>
+      </div>
+    </div>
+
+    <div class="status-indicator" id="status">
+      <span class="status-dot ready"></span>
+      <span class="status-text">Ready</span>
+    </div>
+  </header>
+
+  <!-- ═══════════ Main Layout ═══════════ -->
+  <main class="app-layout">
+
+    <!-- ─── Sidebar ─── -->
+    <aside class="sidebar">
+
+      <!-- Step 1: Upload -->
+      <div class="panel glass-card" id="upload-panel">
+        <h3>
+          <span class="step-badge">1</span>
+          Upload Video
+        </h3>
+        <div class="upload-zone" id="upload-zone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+          <p>Drag &amp; drop video file here</p>
+          <p class="small">or click to browse</p>
+          <input type="file" id="file-input" accept="video/*" hidden>
+        </div>
+        <div class="upload-progress" id="upload-progress" hidden>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <span id="progress-text">0%</span>
+        </div>
+        <div id="file-info" hidden>
+          <p id="file-name"></p>
+          <button class="btn btn-secondary" onclick="resetUpload()">Change</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Define Detection Zones -->
+      <div class="panel glass-card" id="roi-panel" hidden>
+        <h3>
+          <span class="step-badge">2</span>
+          Define Detection Zones
+        </h3>
+        <div class="zone-selector">
+          <button class="btn btn-secondary active" id="btn-zone-crosswalk" onclick="selectZoneType('crosswalk')">Zebra Cross Zone</button>
+          <button class="btn btn-secondary" id="btn-zone-centerline" onclick="selectZoneType('centerline')">Center Line Zone</button>
+        </div>
+        <p class="hint" id="roi-hint">Click on the video frame to draw a polygon around the crosswalk area.</p>
+        <div class="roi-controls">
+          <button class="btn btn-secondary" onclick="clearROI()">Clear Points</button>
+          <button class="btn btn-primary" onclick="completeROI()" id="btn-complete-roi" disabled>Complete Zone</button>
+        </div>
+        <p class="point-count">Points: <span id="point-count">0</span></p>
+      </div>
+
+      <!-- Step 3: Detection Controls -->
+      <div class="panel glass-card" id="detection-panel" hidden>
+        <h3>
+          <span class="step-badge">3</span>
+          Run Detection
+        </h3>
+        <div class="detection-settings">
+          <label class="toggle-label">
+            <input type="checkbox" id="traffic-light-toggle">
+            <span class="toggle-slider"></span>
+            Traffic Light Controlled
+          </label>
+          <label class="setting-label">
+            Confidence Threshold
+            <input type="range" id="confidence-threshold" min="0.3" max="0.9" step="0.05" value="0.5">
+            <span id="confidence-value">0.50</span>
+          </label>
+        </div>
+        <button class="btn btn-primary btn-lg" id="btn-start" onclick="startDetection()">
+          <!-- Play Icon -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Start Detection
+        </button>
+        <button class="btn btn-danger btn-lg" id="btn-stop" onclick="stopDetection()" hidden>
+          <!-- Stop Icon -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="6" width="12" height="12" rx="2"/>
+          </svg>
+          Stop Detection
+        </button>
+        <div class="detection-progress" id="detection-progress" hidden>
+          <div class="progress-bar">
+            <div class="progress-fill" id="detection-progress-fill"></div>
+          </div>
+          <span id="detection-progress-text">0%</span>
+          <span id="detection-frame-text">Frame 0 / 0</span>
+        </div>
+      </div>
+
+      <!-- Stats Panel -->
+      <div class="panel glass-card" id="stats-panel" hidden>
+        <h3>Detection Summary</h3>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-value" id="stat-total">0</span>
+            <span class="stat-label">Total Violations</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="stat-vehicles">0</span>
+            <span class="stat-label">Vehicles</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-value" id="stat-pedestrians">0</span>
+            <span class="stat-label">Pedestrians</span>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- ─── Main Content ─── -->
+    <section class="main-content">
+
+      <!-- Tab Navigation -->
+      <div class="tabs">
+        <button class="tab active" data-tab="detection" onclick="switchTab('detection')">
+          <!-- Monitor Icon -->
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+            <line x1="8" y1="21" x2="16" y2="21"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          Live Detection
+        </button>
+        <button class="tab" data-tab="violations" onclick="switchTab('violations')">
+          <!-- Alert Icon -->
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          Violation Log
+          <span class="badge" id="violation-count">0</span>
+        </button>
+      </div>
+
+      <!-- Detection View -->
+      <div class="tab-content active" id="tab-detection">
+        <div class="video-container glass-card">
+          <canvas id="video-canvas" width="1280" height="720"></canvas>
+          <div class="canvas-overlay" id="canvas-placeholder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="23 7 16 12 23 17 23 7"/>
+              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+            </svg>
+            <p>Upload a video to begin</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Violations View -->
+      <div class="tab-content" id="tab-violations" hidden>
+        <div class="violations-header">
+          <h3>Detected Violations</h3>
+          <button class="btn btn-secondary" onclick="exportViolations()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export JSON
+          </button>
+        </div>
+        <div class="violations-grid" id="violations-grid">
+          <div class="empty-state" id="empty-violations">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <p>No violations detected yet</p>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- ═══════════ Violation Detail Modal ═══════════ -->
+  <div class="modal-overlay" id="modal-overlay" hidden>
+    <div class="modal glass-card">
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+      <div class="modal-content">
+        <img id="modal-screenshot" src="" alt="Violation Screenshot">
+        <div class="modal-details">
+          <h2 id="modal-title">Crosswalk Violation</h2>
+          <div class="detail-grid">
+            <div class="detail-item">
+              <span class="detail-label">Violation ID</span>
+              <span class="detail-value" id="modal-id"></span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Type</span>
+              <span class="detail-value" id="modal-type"></span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Time in Video</span>
+              <span class="detail-value" id="modal-time"></span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Vehicle Type</span>
+              <span class="detail-value" id="modal-vehicle"></span>
+            </div>
+            <div class="detail-item">
+              <span class="detail-label">Confidence</span>
+              <span class="detail-value" id="modal-confidence"></span>
+            </div>
+            <div class="detail-item full-width">
+              <span class="detail-label">Description</span>
+              <span class="detail-value" id="modal-description"></span>
+            </div>
+            <div class="detail-item full-width">
+              <span class="detail-label">Legal Reference</span>
+              <span class="detail-value legal-ref" id="modal-legal"></span>
+            </div>
+            <div class="detail-item full-width">
+              <span class="detail-label">Penalty</span>
+              <span class="detail-value penalty" id="modal-penalty"></span>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-danger" onclick="deleteCurrentViolation()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                <line x1="10" y1="11" x2="10" y2="17"/>
+                <line x1="14" y1="11" x2="14" y2="17"/>
+              </svg>
+              Delete Violation
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Footer ═══════════ -->
+  <footer>
+    <p>DLLAJ AI &mdash; Crosswalk Violation Detection System</p>
+    <p>Based on UU Nomor 22 Tahun 2009 tentang Lalu Lintas dan Angkutan Jalan</p>
+  </footer>
+
+  <!-- App Script -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
