@@ -1,1 +1,12 @@
 .env.md
+
+uploads/*
+!uploads/.gitkeep
+
+violations/screenshots/*
+!violations/screenshots/.gitkeep
+
+violations/data/*
+!violations/data/.gitkeep
+
+sampel-dllaj/
