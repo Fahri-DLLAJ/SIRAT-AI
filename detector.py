@@ -5,6 +5,7 @@ Uses YOLOv8 for real-time object detection (vehicles, pedestrians)
 and checks for violations in user-defined crosswalk zones (ROI).
 """
 
+import os
 import time
 from collections import defaultdict
 
@@ -42,6 +43,7 @@ COLORS = {
     "vehicle_normal": (0, 255, 0),       # Green - vehicle not in violation
     "vehicle_violation": (0, 0, 255),     # Red - vehicle in violation
     "pedestrian": (255, 191, 0),          # Cyan/light blue - pedestrian
+    "priority": (0, 165, 255),            # Orange/Amber - priority vehicle
     "crosswalk_zone": (0, 255, 255),      # Yellow - crosswalk ROI
     "crosswalk_fill": (0, 200, 200),      # Slightly darker yellow for fill
     "centerline_zone": (255, 0, 127),     # Pink/Purple - centerline ROI
@@ -204,6 +206,9 @@ class CrosswalkViolationDetector:
             "frames_processed": 0,
         }
 
+        # Output video path (for download after detection)
+        self.last_output_video_path = None
+
         # State flags
         self.is_running = False
         self._should_stop = False
@@ -295,6 +300,131 @@ class CrosswalkViolationDetector:
             return 0.0
 
         return intersection.area / bbox_area
+
+    def _classify_priority_vehicle(self, frame: np.ndarray, bbox, class_id: int) -> bool:
+        """
+        Classify whether a detected vehicle is a priority vehicle
+        (ambulance, fire truck) by checking for:
+        1. A small red rotating light (strobe/beacon) on top of the vehicle.
+        2. Predominantly white body for ambulances.
+        3. Predominantly red body (for fire trucks / only on buses/trucks).
+
+        Scans the top ~30% of the bounding box for concentrated red
+        pixel clusters that resemble a rooftop emergency light,
+        and the bottom ~75% for body color checks.
+
+        Args:
+            frame: The current video frame (BGR).
+            bbox: (x1, y1, x2, y2) bounding box coordinates.
+            class_id: YOLO class ID (e.g. 2 for car, 7 for truck).
+
+        Returns:
+            True if classified as a priority vehicle.
+        """
+        x1, y1, x2, y2 = [int(c) for c in bbox[:4]]
+        fh, fw = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(fw, x2), min(fh, y2)
+
+        bbox_w = x2 - x1
+        bbox_h = y2 - y1
+        if bbox_w < 10 or bbox_h < 10:
+            return False
+
+        # 1. Detect red rotating light / strobe on top of the vehicle
+        # Focus on the top 30% of the bounding box where the rooftop light sits
+        top_h = max(int(bbox_h * 0.30), 5)
+        top_roi = frame[y1:y1 + top_h, x1:x2]
+
+        if top_roi.size == 0:
+            return False
+
+        hsv_top = cv2.cvtColor(top_roi, cv2.COLOR_BGR2HSV)
+
+        # Detect red hues (HSV red wraps around)
+        lower_red1 = np.array([0, 70, 80])
+        upper_red1 = np.array([12, 255, 255])
+        lower_red2 = np.array([165, 70, 80])
+        upper_red2 = np.array([180, 255, 255])
+
+        mask_red1 = cv2.inRange(hsv_top, lower_red1, upper_red1)
+        mask_red2 = cv2.inRange(hsv_top, lower_red2, upper_red2)
+        mask_red = mask_red1 | mask_red2
+
+        # Morphological close to merge nearby red pixels into a blob
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_CLOSE, kernel)
+
+        # Find contours (clusters) of red pixels
+        contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+
+        top_area = top_roi.shape[0] * top_roi.shape[1]
+        has_red_strobe = False
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+
+            # Strobe light characteristics:
+            # - small but visible (at least 6 pixels)
+            # - not too large (at most 25% of the top area or 120 pixels, otherwise it's part of the car body)
+            if area < 6 or area > top_area * 0.25 or area > 120:
+                continue
+
+            rx, ry, rw, rh = cv2.boundingRect(cnt)
+            if rw == 0 or rh == 0:
+                continue
+
+            aspect_ratio = max(rw, rh) / min(rw, rh)
+            extent = area / (rw * rh)
+
+            # Strobe light is compact and typically near the horizontal center of the vehicle
+            if aspect_ratio < 3.0 and extent > 0.20:
+                # Center of the contour relative to ROI width
+                center_x = rx + rw / 2
+                if 0.1 * bbox_w < center_x < 0.9 * bbox_w:
+                    has_red_strobe = True
+                    break
+
+        if not has_red_strobe:
+            return False
+
+        # 2. Check the vehicle body color (bottom 75% of the bounding box)
+        body_y1 = y1 + int(bbox_h * 0.25)
+        body_roi = frame[body_y1:y2, x1:x2]
+
+        if body_roi.size == 0:
+            return False
+
+        body_hsv = cv2.cvtColor(body_roi, cv2.COLOR_BGR2HSV)
+        total_body_pixels = body_roi.shape[0] * body_roi.shape[1]
+
+        # Check for white / light-colored body (predominantly for Ambulances)
+        # White in HSV has low saturation and high value
+        # Allow slightly shaded whites under sun/shadows (S < 55, V > 110)
+        white_mask = (body_hsv[:, :, 1] < 55) & (body_hsv[:, :, 2] > 110)
+        white_pixel_count = np.sum(white_mask)
+        white_ratio = white_pixel_count / total_body_pixels if total_body_pixels > 0 else 0
+        is_white_body = white_ratio > 0.35
+
+        # Check for red body (for Fire Trucks)
+        mask_red_body1 = cv2.inRange(body_hsv, np.array([0, 70, 70]), np.array([15, 255, 255]))
+        mask_red_body2 = cv2.inRange(body_hsv, np.array([165, 70, 70]), np.array([180, 255, 255]))
+        red_body_mask = mask_red_body1 | mask_red_body2
+        red_pixel_count = np.sum(red_body_mask > 0)
+        red_ratio = red_pixel_count / total_body_pixels if total_body_pixels > 0 else 0
+        is_red_body = red_ratio > 0.30
+
+        # Prioritize ambulances first (white body + strobe light on top, can be any vehicle class)
+        if is_white_body:
+            return True
+
+        # Check for fire trucks (red body + strobe light on top, must be truck or bus class)
+        # Class IDs: 5 (bus), 7 (truck)
+        if is_red_body and class_id in [5, 7]:
+            return True
+
+        return False
 
     def _determine_violation_type(self, track_id: int, overlap: float, pedestrian_nearby: bool, frames_in_zone: int) -> str | None:
         """
@@ -390,8 +520,12 @@ class CrosswalkViolationDetector:
             cv2.putText(annotated, "CENTER LINE ZONE", (centroid[0] - 80, centroid[1]),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLORS["centerline_zone"], 2, cv2.LINE_AA)
 
-        # Draw vehicle bounding boxes
-        violation_track_ids = {v["track_id"] for v in violations_this_frame}
+        # Draw vehicle bounding boxes — only violating (red) and priority (orange) vehicles
+        violation_track_ids = {
+            v["track_id"] for v in violations_this_frame 
+            if v.get("violation_type") != "priority_vehicle"
+        }
+        priority_track_ids = getattr(self, '_priority_track_ids', set())
         for track_id, det in tracked_objects.items():
             x1, y1, x2, y2 = [int(c) for c in det[:4]]
             class_id = int(det[4])
@@ -400,53 +534,60 @@ class CrosswalkViolationDetector:
             if class_id in VEHICLE_CLASS_IDS:
                 vehicle_type = VEHICLE_CLASS_IDS[class_id]
                 is_violating = track_id in violation_track_ids
-                color = COLORS["vehicle_violation"] if is_violating else COLORS["vehicle_normal"]
+                is_priority = track_id in priority_track_ids
 
-                # Draw bbox
-                thickness = 3 if is_violating else 2
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
-
-                # Draw label
                 if is_violating:
+                    # Draw red violation box
+                    color = COLORS["vehicle_violation"]
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
+
                     label = f"VIOLATION! {vehicle_type} #{track_id} ({conf:.2f})"
-                else:
-                    label = f"vehicle #{track_id} ({conf:.2f})"
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+                    cv2.putText(annotated, label, (x1 + 2, y1 - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS["text_fg"], 1, cv2.LINE_AA)
 
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-                cv2.putText(annotated, label, (x1 + 2, y1 - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS["text_fg"], 1, cv2.LINE_AA)
-
-                # Draw violation flash effect
-                if is_violating:
+                    # Draw violation flash effect
                     overlay = annotated.copy()
                     cv2.rectangle(overlay, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3),
                                   COLORS["violation_alert"], 4)
                     cv2.addWeighted(overlay, 0.7, annotated, 0.3, 0, annotated)
 
-        # Draw pedestrian bounding boxes
+                elif is_priority:
+                    # Draw orange priority vehicle box
+                    color = COLORS["priority"]
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+                    label = f"PRIORITY #{track_id} ({conf:.2f})"
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+                    cv2.putText(annotated, label, (x1 + 2, y1 - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS["text_fg"], 1, cv2.LINE_AA)
+
+                # Non-violating, non-priority vehicles: do NOT draw any box (skip green boxes)
+
+        # Draw pedestrian bounding boxes — only violating pedestrians (red)
         for track_id, det in tracked_pedestrians.items():
             x1, y1, x2, y2 = [int(c) for c in det[:4]]
             conf = float(det[5]) if len(det) > 5 else 0.0
-            
+
             is_violating = f"p_{track_id}" in violation_track_ids
-            color = COLORS["vehicle_violation"] if is_violating else COLORS["pedestrian"]
-            
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3 if is_violating else 2)
+
             if is_violating:
+                color = COLORS["vehicle_violation"]
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
+
                 label = f"VIOLATION! Pedestrian #{track_id} ({conf:.2f})"
-            else:
-                label = f"vehicle #{track_id} ({conf:.2f})"
-                
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(annotated, label, (x1 + 2, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS["text_fg"] if is_violating else (0, 0, 0), 1, cv2.LINE_AA)
-            
-            if is_violating:
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(annotated, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
+                cv2.putText(annotated, label, (x1 + 2, y1 - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS["text_fg"], 1, cv2.LINE_AA)
+
                 overlay = annotated.copy()
                 cv2.rectangle(overlay, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), COLORS["violation_alert"], 4)
                 cv2.addWeighted(overlay, 0.7, annotated, 0.3, 0, annotated)
+
+            # Non-violating pedestrians: do NOT draw any box (skip blue/cyan boxes)
 
         # Draw violation alert banner at top if any violations this frame
         if violations_this_frame:
@@ -524,6 +665,21 @@ class CrosswalkViolationDetector:
         # Sets to store unique track IDs seen so far in this video run
         self.unique_vehicle_ids = set()
         self.unique_pedestrian_ids = set()
+
+        # Priority vehicle tracking
+        self._priority_track_ids = set()
+        self._priority_check_cache = {}  # track_id -> bool
+
+        # Initialize VideoWriter to save the rendered/annotated output video
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        tmp_dir = os.path.join(base_dir, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        output_filename = f"output_{int(time.time())}.mp4"
+        output_path = os.path.join(tmp_dir, output_filename)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out_fps = fps / max(frame_skip, 1)  # Adjust for frame skipping
+        video_writer = cv2.VideoWriter(output_path, fourcc, out_fps, (width, height))
+        self.last_output_video_path = output_path
 
         frame_count = 0
         last_emit_time = 0
@@ -639,6 +795,33 @@ class CrosswalkViolationDetector:
                     conf = float(det[5])
                     vehicle_type = VEHICLE_CLASS_IDS.get(class_id, "car")
 
+                    # Priority vehicle classification for all vehicle types
+                    if track_id not in self._priority_check_cache:
+                        is_priority = self._classify_priority_vehicle(frame, [x1, y1, x2, y2], class_id)
+                        self._priority_check_cache[track_id] = is_priority
+                        if is_priority:
+                            self._priority_track_ids.add(track_id)
+
+                    # Decrease cooldown (must do this before potential continue blocks)
+                    if track_id in self.vehicle_violation_cooldown:
+                        self.vehicle_violation_cooldown[track_id] -= 1
+                        if self.vehicle_violation_cooldown[track_id] <= 0:
+                            del self.vehicle_violation_cooldown[track_id]
+
+                    # If priority vehicle, change type and skip standard violation checks, but log it as an incident
+                    if track_id in self._priority_track_ids:
+                        vehicle_type = "priority"
+                        if track_id not in self.vehicle_violation_cooldown:
+                            violations_this_frame.append({
+                                "track_id": track_id,
+                                "violation_type": "priority_vehicle",
+                                "vehicle_type": vehicle_type,
+                                "bbox": [x1, y1, x2, y2],
+                                "confidence": conf,
+                                "overlap": 0.0,
+                            })
+                        continue  # Exempt priority vehicles from standard violation checks
+
                     # Check overlap with crosswalk zone
                     overlap = self._check_overlap([x1, y1, x2, y2])
                     if overlap >= MIN_OVERLAP_RATIO:
@@ -652,12 +835,6 @@ class CrosswalkViolationDetector:
                         self.vehicle_in_centerline_frames[track_id] += 1
                     else:
                         self.vehicle_in_centerline_frames[track_id] = max(0, self.vehicle_in_centerline_frames.get(track_id, 0) - 1)
-
-                    # Decrease cooldown
-                    if track_id in self.vehicle_violation_cooldown:
-                        self.vehicle_violation_cooldown[track_id] -= 1
-                        if self.vehicle_violation_cooldown[track_id] <= 0:
-                            del self.vehicle_violation_cooldown[track_id]
 
                     # Determine violation
                     frames_in_zone = self.vehicle_in_zone_frames.get(track_id, 0)
@@ -722,6 +899,11 @@ class CrosswalkViolationDetector:
                                 "overlap": p_centerline_overlap,
                             })
 
+                # Sort violations: regular violations first, priority vehicles last
+                violations_this_frame.sort(
+                    key=lambda x: 1 if x.get("violation_type") == "priority_vehicle" else 0
+                )
+
                 # Draw annotations
                 annotated_frame = self._draw_annotations(
                     frame, tracked, tracked_pedestrians, violations_this_frame
@@ -749,6 +931,9 @@ class CrosswalkViolationDetector:
                     # Emit violation event via WebSocket
                     if socketio and sid:
                         socketio.emit("violation", violation_record, room=sid)
+
+                # Write annotated frame to output video file
+                video_writer.write(annotated_frame)
 
                 # Encode annotated frame as JPEG for streaming
                 _, buffer = cv2.imencode(".jpg", annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -778,13 +963,17 @@ class CrosswalkViolationDetector:
 
         finally:
             cap.release()
+            video_writer.release()
             self.is_running = False
 
-            # Emit completion
+            print(f"[DLLAJ AI] Output video saved to: {output_path}")
+
+            # Emit completion with output video path
             if socketio and sid:
                 socketio.emit("detection_complete", {
                     "stats": self.stats,
                     "violations": self.violation_tracker.get_all_violations(),
+                    "output_video": output_filename,
                 }, room=sid)
 
             print(f"[DLLAJ AI] Detection complete. Processed {frame_count} frames.")

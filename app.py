@@ -27,6 +27,7 @@ MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB max upload
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(VIOLATIONS_FOLDER, "data"), exist_ok=True)
 os.makedirs(os.path.join(VIOLATIONS_FOLDER, "screenshots"), exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, "tmp"), exist_ok=True)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -293,6 +294,19 @@ def use_sample_video():
         "filename": data["filename"],
         "video_info": video_info,
     })
+
+
+@app.route("/api/download-video", methods=["GET"])
+def download_video():
+    """Download the last rendered/annotated output video."""
+    output_path = getattr(detector, 'last_output_video_path', None)
+    if output_path is None or not os.path.isfile(output_path):
+        return jsonify({"error": "No rendered video available. Run detection first."}), 404
+
+    directory = os.path.dirname(output_path)
+    filename = os.path.basename(output_path)
+    return send_from_directory(directory, filename, as_attachment=True,
+                               download_name=f"dllaj_ai_detection_{filename}")
 
 
 # ==========================

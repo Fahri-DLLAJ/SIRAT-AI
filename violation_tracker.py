@@ -55,6 +55,12 @@ VIOLATION_TYPES = {
         "legal_reference": "Pasal 106 ayat (4) huruf a jo. Pasal 287 ayat (1) UU No. 22 Tahun 2009",
         "penalty": "Pidana kurungan paling lama 2 bulan atau denda paling banyak Rp500.000",
     },
+    "priority_vehicle": {
+        "name": "Kendaraan Prioritas Melintas",
+        "description_template": "Kendaraan prioritas ({vehicle_type}) terdeteksi melintas",
+        "legal_reference": "Pasal 134 UU No. 22 Tahun 2009 (Hak Utama Pengguna Jalan)",
+        "penalty": "Wajib didahului dan diberi kelonggaran jalan",
+    },
 }
 
 # YOLO class names to Indonesian vehicle types
@@ -66,6 +72,7 @@ VEHICLE_TYPE_NAMES = {
     "bicycle": "Sepeda",
     "pedestrian": "Pejalan Kaki",
     "pejalan kaki": "Pejalan Kaki",
+    "priority": "Ambulans/Pemadam Kebakaran",
 }
 
 

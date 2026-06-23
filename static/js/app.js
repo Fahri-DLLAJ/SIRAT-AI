@@ -15,6 +15,7 @@ let isDetecting = false;
 let violations = [];
 let firstFrame = null;
 let currentModalViolationId = null;
+let outputVideoFile = null;
 
 // ── Canvas references ──
 let canvas, ctx;
@@ -230,6 +231,10 @@ function resetUpload() {
 
   showStep(1);
   showPlaceholder();
+
+  // Hide download bar
+  document.getElementById('download-video-bar').hidden = true;
+  outputVideoFile = null;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
@@ -626,6 +631,12 @@ function initWebSocket() {
       document.getElementById('stat-pedestrians').textContent = data.stats.total_pedestrians || 0;
     }
 
+    // Show download button if output video is available
+    if (data && data.output_video) {
+      outputVideoFile = data.output_video;
+      document.getElementById('download-video-bar').hidden = false;
+    }
+
     showToast('Detection completed!', 'success');
     loadViolations();
   });
@@ -822,8 +833,50 @@ function exportViolations() {
   showToast('Violations exported!', 'success');
 }
 
+async function clearAllViolations() {
+  if (violations.length === 0) {
+    showToast('No violations to clear.', 'warning');
+    return;
+  }
+
+  if (!confirm('Are you sure you want to clear all violation logs and screenshots? This action cannot be undone.')) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/violations/clear`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Failed to clear violations');
+
+    violations = [];
+    const grid = document.getElementById('violations-grid');
+    const cards = grid.querySelectorAll('.violation-card');
+    cards.forEach((c) => c.remove());
+
+    const emptyState = document.getElementById('empty-violations');
+    if (emptyState) emptyState.hidden = false;
+
+    updateViolationCount();
+
+    const statTotal = document.getElementById('stat-total');
+    if (statTotal) statTotal.textContent = 0;
+
+    showToast('All violation logs cleared successfully.', 'success');
+  } catch (err) {
+    showToast(`Clear error: ${err.message}`, 'error');
+  }
+}
+
 function updateViolationCount() {
   document.getElementById('violation-count').textContent = violations.length;
+}
+
+function downloadRenderedVideo() {
+  if (!outputVideoFile) {
+    showToast('No rendered video available.', 'warning');
+    return;
+  }
+  window.location.href = `${API_BASE}/api/download-video`;
+  showToast('Downloading rendered video...', 'info');
 }
 
 // ============================================================
